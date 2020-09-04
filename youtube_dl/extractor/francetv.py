@@ -86,33 +86,26 @@ class FranceTVIE(InfoExtractor):
     }]
 
     def _extract_video(self, video_id, catalogue=None):
-        # Videos are identified by idDiffusion so catalogue part is optional.
-        # However when provided, some extra formats may be returned so we pass
-        # it if available.
-        info = self._download_json(
-            'https://sivideo.webservices.francetelevisions.fr/tools/getInfosOeuvre/v2/',
-            video_id, 'Downloading video JSON', query={
-                'idDiffusion': video_id,
-                'catalogue': catalogue or '',
-            })
 
-        if info.get('status') == 'NOK':
-            raise ExtractorError(
-                '%s returned error: %s' % (self.IE_NAME, info['message']),
-                expected=True)
-        allowed_countries = info['videos'][0].get('geoblocage')
-        if allowed_countries:
-            georestricted = True
-            geo_info = self._download_json(
-                'http://geo.francetv.fr/ws/edgescape.json', video_id,
-                'Downloading geo restriction info')
-            country = geo_info['reponse']['geo_info']['country_code']
-            if country not in allowed_countries:
-                raise ExtractorError(
-                    'The video is not available from your location',
-                    expected=True)
-        else:
-            georestricted = False
+        def check_georestriction(allowed_countries):
+            if allowed_countries:
+                georestricted = True
+                geo_info = self._download_json(
+                    'http://geo.francetv.fr/ws/edgescape.json', video_id,
+                    'Downloading geo restriction info')
+                country = geo_info['reponse']['geo_info']['country_code']
+                if country not in allowed_countries:
+                    raise ExtractorError(
+                        'The video is not available from your location',
+                        expected=True)
+            else:
+                georestricted = False
+            return georestricted
+
+        def bake_title(title, subtitle=None):
+            if subtitle:
+                title += ' - %s' % subtitle
+            return title.strip()
 
         def sign(manifest_url, manifest_id):
             for host in ('hdfauthftv-a.akamaihd.net', 'hdfauth.francetv.fr'):
@@ -126,29 +119,16 @@ class FranceTVIE(InfoExtractor):
                     return signed_url
             return manifest_url
 
-        is_live = None
-
-        formats = []
-        for video in info['videos']:
-            if video['statut'] != 'ONLINE':
-                continue
-            video_url = video['url']
-            if not video_url:
-                continue
-            if is_live is None:
-                is_live = (try_get(
-                    video, lambda x: x['plages_ouverture'][0]['direct'],
-                    bool) is True) or '/live.francetv.fr/' in video_url
-            format_id = video['format']
+        def get_video_formats(video_url, format_id, georestricted=False):
+            formats = []
             ext = determine_ext(video_url)
             if ext == 'f4m':
-                if georestricted:
+                if not georestricted:
                     # See https://github.com/ytdl-org/youtube-dl/issues/3963
                     # m3u8 urls work fine
-                    continue
-                formats.extend(self._extract_f4m_formats(
-                    sign(video_url, format_id) + '&hdcore=3.7.0&plugin=aasp-3.7.0.39.44',
-                    video_id, f4m_id=format_id, fatal=False))
+                    formats.extend(self._extract_f4m_formats(
+                        sign(video_url, format_id) + '&hdcore=3.7.0&plugin=aasp-3.7.0.39.44',
+                        video_id, f4m_id=format_id, fatal=False))
             elif ext == 'm3u8':
                 formats.extend(self._extract_m3u8_formats(
                     sign(video_url, format_id), video_id, 'mp4',
@@ -160,39 +140,113 @@ class FranceTVIE(InfoExtractor):
                     'format_id': 'rtmp-%s' % format_id,
                     'ext': 'flv',
                 })
+            elif ext == 'mpd':
+                formats.extend(self._extract_mpd_formats(
+                    sign(video_url, format_id), video_id,
+                    mpd_id=format_id,
+                    fatal=False))
             else:
                 if self._is_valid_url(video_url, video_id, format_id):
                     formats.append({
                         'url': video_url,
                         'format_id': format_id,
                     })
-        self._sort_formats(formats)
+            return formats
 
-        title = info['titre']
-        subtitle = info.get('sous_titre')
-        if subtitle:
-            title += ' - %s' % subtitle
-        title = title.strip()
+        def get_sivideo_api_infos():
 
-        subtitles = {}
-        subtitles_list = [{
-            'url': subformat['url'],
-            'ext': subformat.get('format'),
-        } for subformat in info.get('subtitles', []) if subformat.get('url')]
-        if subtitles_list:
-            subtitles['fr'] = subtitles_list
+            # Videos are identified by idDiffusion so catalogue part is optional.
+            # However when provided, some extra formats may be returned so we pass
+            # it if available.
+            info = self._download_json(
+                'https://sivideo.webservices.francetelevisions.fr/tools/getInfosOeuvre/v2/',
+                video_id, 'Downloading video JSON', query={
+                    'idDiffusion': video_id,
+                    'catalogue': catalogue or '',
+                }, fatal=False)
 
-        return {
-            'id': video_id,
-            'title': self._live_title(title) if is_live else title,
-            'description': clean_html(info['synopsis']),
-            'thumbnail': compat_urlparse.urljoin('http://pluzz.francetv.fr', info['image']),
-            'duration': int_or_none(info.get('real_duration')) or parse_duration(info['duree']),
-            'timestamp': int_or_none(info['diffusion']['timestamp']),
-            'is_live': is_live,
-            'formats': formats,
-            'subtitles': subtitles,
-        }
+            if info.get('status') == 'NOK':
+                raise ExtractorError(
+                    '%s returned error: %s' % (self.IE_NAME, info['message']),
+                    expected=True)
+            allowed_countries = info['videos'][0].get('geoblocage')
+            georestricted = check_georestriction(allowed_countries)
+
+            is_live = None
+
+            formats = []
+            for video in info['videos']:
+                if video['statut'] != 'ONLINE':
+                    continue
+                video_url = video['url']
+                if not video_url:
+                    continue
+                if is_live is None:
+                    is_live = (try_get(
+                        video, lambda x: x['plages_ouverture'][0]['direct'],
+                        bool) is True) or '/live.francetv.fr/' in video_url
+                format_id = video['format']
+                formats.extend(get_video_formats(video_url, format_id, georestricted))
+
+            title = bake_title(info['titre'], info.get('sous_titre'))
+
+            subtitles = {}
+            subtitles_list = [{
+                'url': subformat['url'],
+                'ext': subformat.get('format'),
+            } for subformat in info.get('subtitles', []) if subformat.get('url')]
+            if subtitles_list:
+                subtitles['fr'] = subtitles_list
+
+            return {
+                'id': video_id,
+                'title': self._live_title(title) if is_live else title,
+                'description': clean_html(info['synopsis']),
+                'thumbnail': compat_urlparse.urljoin('http://pluzz.francetv.fr', info['image']),
+                'duration': int_or_none(info.get('real_duration')) or parse_duration(info['duree']),
+                'timestamp': int_or_none(info['diffusion']['timestamp']),
+                'is_live': is_live,
+                'formats': formats,
+                'subtitles': subtitles,
+            }
+
+        def get_player_api_infos():
+
+            info = self._download_json(
+                'https://player.webservices.francetelevisions.fr/v1/videos/%s' % video_id,
+                video_id, 'Downloading alternative video JSON', query={
+                    'device_type': 'desktop',
+                    'browser': 'ytdl',
+                })
+
+            video = info.get('video')
+            if video is None:
+                return
+
+            video_url = video['url']
+            if not video_url:
+                return
+            formats = get_video_formats(video_url, video['format'])
+
+            meta = info['meta']
+            title = bake_title(meta['title'], meta.get('additional_title'))
+
+            return {
+                'id': video_id,
+                'title': self._live_title(title) if video.get('is_live') else title,
+                'thumbnail': meta.get('image_url'),
+                'duration': int_or_none(video.get('duration')),
+                'is_live': video.get('is_live'),
+                'formats': formats,
+                #'timestamp' may be available using info['meta'].get('broadcasted_at')
+            }
+
+        infos = get_sivideo_api_infos()
+        if not len(infos['formats']):
+            infos = get_player_api_infos() or []
+
+        self._sort_formats(infos['formats'])
+        return infos
 
     def _real_extract(self, url):
         mobj = re.match(self._VALID_URL, url)
