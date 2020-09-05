@@ -238,7 +238,7 @@ class FranceTVIE(InfoExtractor):
                 'duration': int_or_none(video.get('duration')),
                 'is_live': video.get('is_live'),
                 'formats': formats,
-                #'timestamp' may be available using info['meta'].get('broadcasted_at')
+                # 'timestamp' may be available using info['meta'].get('broadcasted_at')
             }
 
         georestricted, infos = get_sivideo_api_infos()
