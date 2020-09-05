@@ -198,7 +198,7 @@ class FranceTVIE(InfoExtractor):
             if subtitles_list:
                 subtitles['fr'] = subtitles_list
 
-            return {
+            return georestricted, {
                 'id': video_id,
                 'title': self._live_title(title) if is_live else title,
                 'description': clean_html(info['synopsis']),
@@ -210,7 +210,7 @@ class FranceTVIE(InfoExtractor):
                 'subtitles': subtitles,
             }
 
-        def get_player_api_infos():
+        def get_player_api_infos(georestricted=False):
 
             info = self._download_json(
                 'https://player.webservices.francetelevisions.fr/v1/videos/%s' % video_id,
@@ -226,7 +226,7 @@ class FranceTVIE(InfoExtractor):
             video_url = video['url']
             if not video_url:
                 return
-            formats = get_video_formats(video_url, video['format'])
+            formats = get_video_formats(video_url, video['format'], georestricted)
 
             meta = info['meta']
             title = bake_title(meta['title'], meta.get('additional_title'))
@@ -241,9 +241,11 @@ class FranceTVIE(InfoExtractor):
                 #'timestamp' may be available using info['meta'].get('broadcasted_at')
             }
 
-        infos = get_sivideo_api_infos()
+        georestricted, infos = get_sivideo_api_infos()
         if not len(infos['formats']):
-            infos = get_player_api_infos() or []
+            # try getting formats from another source API
+            # and merge it to what we already got
+            infos.update(get_player_api_infos(georestricted))
 
         self._sort_formats(infos['formats'])
         return infos
